@@ -40,6 +40,8 @@ Guide to app flow, folder structure, and what each module/function does.
 
 ### 2.1 Distance: Haversine formula
 
+**Purpose:** Compute straight-line distance between two map points (e.g. stop vs route vertex, or “nearest next” stop) so we can order stops, project markers onto the route, and show “X km” from a reference point. Uses great-circle distance because coordinates are on a sphere.
+
 **Where:** `src/lib/distance.ts` → `distanceMeters(a, b)`
 
 **Algorithm:** Haversine formula for great-circle distance on a sphere.
@@ -53,6 +55,8 @@ Guide to app flow, folder structure, and what each module/function does.
 ---
 
 ### 2.2 Stop ordering: Greedy nearest-neighbor (TSP heuristic)
+
+**Purpose:** Suggest a visit order that reduces total travel: start at the first stop, then repeatedly go to the nearest unvisited stop. Powers the “Suggest route” action so the user gets a quick, reasonable order without calling the OSRM Trip API. Optional; the user can still choose “Shortest route” (OSRM) for a better global order.
 
 **Where:** `src/lib/orderStops.ts` → `orderByNearestFromStart(items)`
 
@@ -70,6 +74,8 @@ Guide to app flow, folder structure, and what each module/function does.
 
 ### 2.3 Route–marker projection: Closest point on polyline
 
+**Purpose:** Find where each itinerary stop (marker) lies along the road route so we can split the route into segments between consecutive stops. That split is used to color the line by day (e.g. Day 1 blue, Day 2 green) and show “this stretch belongs to Day N.”
+
 **Where:** `src/lib/routeSegments.ts` → `findClosestRouteIndex(routeCoords, point)`
 
 **Algorithm:** Linear scan along the route polyline.
@@ -80,6 +86,8 @@ Guide to app flow, folder structure, and what each module/function does.
 ---
 
 ### 2.4 Day segments: Split route by stop order and days
+
+**Purpose:** Turn the full route polyline into per-day segments so the map can draw each day in a different color (e.g. Day 1–5) and the user can see which part of the trip is Day 1, Day 2, etc. Uses stop order and per-stop day assignment (manual or auto by STOPS_PER_DAY).
 
 **Where:** `src/lib/routeSegments.ts` → `getRouteSegmentsByDay(routeCoords, markers, stopDays)`
 
@@ -106,6 +114,8 @@ Guide to app flow, folder structure, and what each module/function does.
 
 ### 2.5 Place type filter: Category + keyword fallback
 
+**Purpose:** Filter the place list by type (Beaches, Mountains, Heritage) so the user sees only the kind of spots they care about. Uses explicit `place.category` when set (e.g. from Overpass tags) and falls back to name keywords so places without a category still match when the name suggests the type.
+
 **Where:** `src/lib/placeUtils.ts` → `placeMatchesType(place, type)`
 
 **Logic:**
@@ -125,6 +135,8 @@ Substring checks are case-insensitive.
 
 ### 2.6 Place category tag (display label)
 
+**Purpose:** Show a short label on each place card (e.g. “NATURE”, “HERITAGE”, or a formatted OSM type) so the user can quickly see what kind of place it is without opening the link. Used for the badge on the place carousel cards.
+
 **Where:** `src/lib/placeUtils.ts` → `placeCategoryTag(place)`
 
 **Logic (cascade):**
@@ -137,6 +149,8 @@ Substring checks are case-insensitive.
 ---
 
 ### 2.7 Routing APIs (OSRM): Trip vs Route
+
+**Purpose:** Get a road-following path between stops (driving/walking/cycling) and optionally let the server reorder stops to shorten the trip. Trip = “best order + path”; Route = “path in the order I gave.” Powers the “By road” and “Shortest route” buttons and provides the polyline and distance/duration shown on the map and in the UI.
 
 **Where:** `src/api/osrm.ts`
 
