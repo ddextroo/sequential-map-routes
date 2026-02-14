@@ -6,11 +6,17 @@ import {
 	MarkerContent,
 	MarkerLabel,
 	MapRoute,
+	type MapRef,
 } from "@/components/ui/map";
 import {
 	getOptimizedTrip,
 	getRouteByRoad,
 	type OSRMProfile,
+	searchPlacesNominatim,
+	fetchPlacesOverpass,
+	fetchProvinces,
+	filterProvincesByName,
+	type PsgcProvince,
 } from "@/api";
 import type { Place, PlaceCategory, MarkerItem, RouteMode } from "@/types";
 import {
@@ -18,8 +24,9 @@ import {
 	STOPS_PER_DAY,
 	getDayColor,
 	PROVINCE_BBOXES,
+	PROVINCES_BY_REGION,
 	REGIONS,
-	PROVINCES_VISAYAS,
+	SUPPORTED_PROVINCE_NAMES,
 	TYPE_FILTERS,
 	PROFILE_LABELS,
 } from "@/constants";
@@ -27,12 +34,17 @@ import { distanceMeters } from "@/lib/distance";
 import { orderByNearestFromStart } from "@/lib/orderStops";
 import { getRouteSegmentsByDay } from "@/lib/routeSegments";
 import { placeMatchesType, placeCategoryTag } from "@/lib/placeUtils";
-import { searchPlacesNominatim, fetchPlacesOverpass } from "@/api";
 import { Mountain, Waves, MapPin, ChevronRight, Check, Loader2, Calendar, X } from "lucide-react";
 
 const REGION_ICONS = { mountain: Mountain, waves: Waves } as const;
 
+/** Convert our bbox [south, west, north, east] to MapLibre [[west, south], [east, north]]. */
+function bboxToBounds(bbox: [number, number, number, number]): [[number, number], [number, number]] {
+	return [[bbox[1], bbox[0]], [bbox[3], bbox[2]]];
+}
+
 const App = () => {
+	const mapRef = useRef<MapRef | null>(null);
 	const [markers, setMarkers] = useState<MarkerItem[]>([]);
 	const [routeMode, setRouteMode] = useState<RouteMode>("road");
 	const [profile, setProfile] = useState<OSRMProfile>("driving");
@@ -47,13 +59,68 @@ const App = () => {
 	const [selectedPlaces, setSelectedPlaces] = useState<Place[]>([]);
 	const [region, setRegion] = useState<"luzon" | "visayas" | "mindanao">("visayas");
 	const [province, setProvince] = useState("Cebu");
-	const [typeFilter, setTypeFilter] = useState<PlaceCategory | null>(null);
+	const [typeFilter, setTypeFilter] = useState<PlaceCategory | null>("beaches");
+	/** 5 provinces per region from PSGC; keyed by region. Fallback to PROVINCES_BY_REGION names. */
+	const [provincesByRegion, setProvincesByRegion] = useState<Record<"luzon" | "visayas" | "mindanao", { name: string }[]>>({
+		luzon: PROVINCES_BY_REGION.luzon.map((name) => ({ name })),
+		visayas: PROVINCES_BY_REGION.visayas.map((name) => ({ name })),
+		mindanao: PROVINCES_BY_REGION.mindanao.map((name) => ({ name })),
+	});
 	const [reviewOpen, setReviewOpen] = useState(false);
 	const [searchPlaceLoading, setSearchPlaceLoading] = useState(false);
 	const [searchPlaceError, setSearchPlaceError] = useState<string | null>(null);
 	const [stopDays, setStopDays] = useState<number[]>([]);
 	const [clickedMarkerIndex, setClickedMarkerIndex] = useState<number | null>(null);
 	const prevPlacesLengthRef = useRef(0);
+
+	// Fetch provinces from PSGC and group 5 per region (by islandGroupCode)
+	useEffect(() => {
+		fetchProvinces()
+			.then((all) => {
+				const filtered = filterProvincesByName(all, SUPPORTED_PROVINCE_NAMES);
+				const byName = new Map(filtered.map((p) => [p.name.toLowerCase(), p]));
+				const next: Record<"luzon" | "visayas" | "mindanao", { name: string }[]> = {
+					luzon: PROVINCES_BY_REGION.luzon.map((name) => ({ name: byName.get(name.toLowerCase())?.name ?? name })),
+					visayas: PROVINCES_BY_REGION.visayas.map((name) => ({ name: byName.get(name.toLowerCase())?.name ?? name })),
+					mindanao: PROVINCES_BY_REGION.mindanao.map((name) => ({ name: byName.get(name.toLowerCase())?.name ?? name })),
+				};
+				setProvincesByRegion(next);
+			})
+			.catch(() => {});
+	}, []);
+
+	// When region changes: if current province is not in this region, select first province of the region
+	useEffect(() => {
+		const namesInRegion = provincesByRegion[region].map((p) => p.name);
+		if (namesInRegion.length > 0 && !namesInRegion.includes(province)) {
+			setProvince(namesInRegion[0]);
+		}
+	}, [region, provincesByRegion]);
+
+	// When province changes: default type to beaches, focus map on province
+	useEffect(() => {
+		setTypeFilter("beaches");
+		const bbox = PROVINCE_BBOXES[province];
+		if (bbox) {
+			const timer = setTimeout(() => {
+				mapRef.current?.fitBounds(bboxToBounds(bbox), { padding: 50, duration: 500 });
+			}, 100);
+			return () => clearTimeout(timer);
+		}
+	}, [province]);
+
+	// Load places when province changes (best spots for selected province + default type)
+	useEffect(() => {
+		const bbox = PROVINCE_BBOXES[province];
+		if (!bbox) return;
+		setPlacesLoading(true);
+		setPlacesError(null);
+		fetchPlacesOverpass(bbox).then(({ places: list, error: err }) => {
+			setPlacesLoading(false);
+			if (err) setPlacesError(err);
+			else setPlaces(list);
+		});
+	}, [province]);
 
 	const applyRoadRoute = useCallback(async () => {
 		const coords = markers.map((m) => m.coords);
@@ -222,7 +289,11 @@ const App = () => {
 		let list = places;
 		const q = placeSearch.trim().toLowerCase();
 		if (q) list = list.filter((p) => p.name.toLowerCase().includes(q));
-		if (typeFilter) list = list.filter((p) => placeMatchesType(p, typeFilter));
+		if (typeFilter) {
+			list = list.filter((p) => placeMatchesType(p, typeFilter));
+			// When default type (e.g. beaches) matches nothing, show all places so "best spots" still updates
+			if (list.length === 0 && places.length > 0) list = places.filter((p) => !q || p.name.toLowerCase().includes(q));
+		}
 		return list;
 	}, [places, placeSearch, typeFilter]);
 
@@ -345,19 +416,19 @@ const App = () => {
 					</div>
 					<div className="border-b border-neutral-100 p-3">
 						<h2 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-							PROVINCES IN {region === "visayas" ? "VISAYAS" : region === "luzon" ? "LUZON" : "MINDANAO"}
+							PROVINCES (5 per region) — <a href="https://psgc.gitlab.io/api/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:underline">PSGC</a>
 						</h2>
 						<div className="mt-2 flex flex-col gap-0.5">
-							{(region === "visayas" ? PROVINCES_VISAYAS : ["—"]).map((p) => (
+							{provincesByRegion[region].map((p) => (
 								<button
-									key={p}
+									key={p.name}
 									type="button"
-									onClick={() => setProvince(p)}
+									onClick={() => setProvince(p.name)}
 									className={`rounded-lg px-3 py-2 text-left text-sm ${
-										province === p ? "bg-emerald-600 font-medium text-white" : "text-neutral-600 hover:bg-neutral-50"
+										province === p.name ? "bg-emerald-600 font-medium text-white" : "text-neutral-600 hover:bg-neutral-50"
 									}`}
 								>
-									{p}
+									{p.name}
 								</button>
 							))}
 						</div>
@@ -386,6 +457,7 @@ const App = () => {
 				{/* Map + overlay + place carousel */}
 				<main className="relative flex flex-1 flex-col min-h-0">
 					<Map
+						ref={mapRef}
 						className="h-full w-full"
 						theme="light"
 						viewport={{ center: CENTER, zoom: 12 }}

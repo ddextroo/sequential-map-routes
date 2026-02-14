@@ -32,9 +32,124 @@ Guide to app flow, folder structure, and what each module/function does.
 | 6 | Route request | `getRouteByRoad` or `getOptimizedTrip` → `routeCoords` + stats |
 | 7 | Day segments | `getRouteSegmentsByDay(routeCoords, markers, stopDays)` → colored segments |
 
+**Province & default type:** The app shows **5 provinces** from the [PSGC API](https://psgc.gitlab.io/api/) (Cebu, Bohol, Negros Oriental, Siquijor, Iloilo). When you select a province, the **type filter defaults to "Beaches"**, places are **auto-loaded** for that province (Overpass), and the **map camera fits** to the province bbox.
+
 ---
 
-## 2. Folder structure
+## 2. Algorithms and logic
+
+### 2.1 Distance: Haversine formula
+
+**Where:** `src/lib/distance.ts` → `distanceMeters(a, b)`
+
+**Algorithm:** Haversine formula for great-circle distance on a sphere.
+
+- **Input:** Two points as `[longitude, latitude]` in degrees.
+- **Constants:** Earth radius `R = 6_371_000` m.
+- **Steps:** Convert lat/lng deltas to radians; compute central angle via  
+  `sin²(Δlat/2) + cos(lat1)·cos(lat2)·sin²(Δlng/2)`; return `2·R·atan2(√x, √(1−x))`.
+- **Output:** Distance in meters (as-the-crow-flies). No road or elevation.
+
+---
+
+### 2.2 Stop ordering: Greedy nearest-neighbor (TSP heuristic)
+
+**Where:** `src/lib/orderStops.ts` → `orderByNearestFromStart(items)`
+
+**Algorithm:** Nearest-neighbor heuristic for the Traveling Salesman Problem (TSP).
+
+- **Logic:**
+  1. Fix the **first** item as the start (order is not fully optimized from all possible starts).
+  2. From the current point, find the **nearest** remaining item (by `distanceMeters`).
+  3. Append it to the ordered list, remove from remaining, set as new “current”.
+  4. Repeat until no items left.
+- **Complexity:** O(n²) distance computations for n stops.
+- **Note:** Does not guarantee the globally shortest tour; OSRM Trip (see below) can do a better server-side optimization when you use “Optimized” route.
+
+---
+
+### 2.3 Route–marker projection: Closest point on polyline
+
+**Where:** `src/lib/routeSegments.ts` → `findClosestRouteIndex(routeCoords, point)`
+
+**Algorithm:** Linear scan along the route polyline.
+
+- **Logic:** For each route vertex, compute `distanceMeters(vertex, point)`; return the index of the vertex with minimum distance.
+- **Complexity:** O(L) where L = number of route points. No spatial index; sufficient for typical route lengths.
+
+---
+
+### 2.4 Day segments: Split route by stop order and days
+
+**Where:** `src/lib/routeSegments.ts` → `getRouteSegmentsByDay(routeCoords, markers, stopDays)`
+
+**Logic (step by step):**
+
+1. **Project markers onto route**  
+   For each marker, get `findClosestRouteIndex(routeCoords, marker.coords)` → one index per marker.
+
+2. **Enforce strictly increasing indices**  
+   So segments are non-overlapping and follow travel order:  
+   If `indices[i] <= indices[i-1]`, set `indices[i] = min(indices[i-1] + 1, routeCoords.length - 1)`.  
+   Clamp the last index to `routeCoords.length - 1` so it stays on the route.
+
+3. **Build one segment per pair of consecutive markers**  
+   For each `i` from `0` to `markers.length - 2`:  
+   - Segment = `routeCoords.slice(indices[i], indices[i+1] + 1)`.  
+   - Only keep segments with at least 2 points.  
+   - **Day** for that segment: `stopDays[i]` if set, else `floor(i / STOPS_PER_DAY) + 1` (1-based day).
+
+4. **Output**  
+   Array of `{ coords, day }` (i.e. `RouteSegment[]`) used to draw the route in different colors per day.
+
+---
+
+### 2.5 Place type filter: Category + keyword fallback
+
+**Where:** `src/lib/placeUtils.ts` → `placeMatchesType(place, type)`
+
+**Logic:**
+
+- **`type === null`:** Match all (no filter).
+- **Exact:** If `place.category === type`, match.
+- **Keyword fallback (when category missing or different):**  
+  Lowercase `place.name`; then:
+  - **beaches:** name contains any of `"beach"`, `"resort"`, `"island"`.
+  - **mountains:** name contains any of `"mountain"`, `"peak"`, `"hill"`, `"view"`.
+  - **heritage:** name contains any of `"church"`, `"temple"`, `"museum"`, `"heritage"`, `"monument"`.
+- **Else:** No match.
+
+Substring checks are case-insensitive.
+
+---
+
+### 2.6 Place category tag (display label)
+
+**Where:** `src/lib/placeUtils.ts` → `placeCategoryTag(place)`
+
+**Logic (cascade):**
+
+1. If `place.category === "beaches"` or `"mountains"` → `"NATURE"`.
+2. Else if `place.category === "heritage"` → `"HERITAGE"`.
+3. Else if `place.placeType` exists → capitalize and replace underscores with spaces (e.g. `"tourist_attraction"` → `"Tourist attraction"`).
+4. Else → `"LANDMARK"`.
+
+---
+
+### 2.7 Routing APIs (OSRM): Trip vs Route
+
+**Where:** `src/api/osrm.ts`
+
+| API | Algorithm / behavior | Use in app |
+|-----|----------------------|------------|
+| **Trip** (`getOptimizedTrip`) | OSRM solves a **TSP** on the server: finds an order of waypoints that minimizes total travel (distance/duration) and returns that order plus road geometry. Optional roundtrip (return to start). | “Optimized” route: order of stops is changed to a shorter tour; markers are reordered to match. |
+| **Route** (`getRouteByRoad`) | **Fixed order**: waypoints are visited in the order given. OSRM returns the road path (polyline) and total distance/duration. | “Road” route: user/suggested order is kept; we only get the driving/walking/cycling path. |
+
+**Profile:** `driving` | `walking` | `cycling` selects the cost function (road network and speeds) used by OSRM.
+
+---
+
+## 3. Folder structure
 
 ```
 src/
@@ -69,7 +184,7 @@ src/
 
 ---
 
-## 3. Types (DTOs and enums)
+## 4. Types (DTOs and enums)
 
 ### `src/types/place.ts`
 
@@ -89,7 +204,7 @@ src/
 
 ---
 
-## 4. Constants
+## 5. Constants
 
 ### `src/constants/map.ts`
 
@@ -117,7 +232,7 @@ src/
 
 ---
 
-## 5. Lib (pure helpers)
+## 6. Lib (pure helpers)
 
 ### `src/lib/distance.ts`
 
@@ -157,7 +272,7 @@ Re-exports `Place` and `PlaceCategory` from `@/types` for backward compatibility
 
 ---
 
-## 6. API (external services)
+## 7. API (external services)
 
 ### `src/api/osrm.ts`
 
@@ -181,7 +296,7 @@ Re-exports `Place` and `PlaceCategory` from `@/types` for backward compatibility
 
 ---
 
-## 7. App.tsx — main state and handlers
+## 8. App.tsx — main state and handlers
 
 | State | Purpose |
 |-------|---------|
@@ -211,7 +326,7 @@ Re-exports `Place` and `PlaceCategory` from `@/types` for backward compatibility
 
 ---
 
-## 8. Path aliases
+## 9. Path aliases
 
 - `@/` → `src/` (e.g. `@/types`, `@/constants`, `@/lib/...`, `@/api`).
 - Configured in `vite.config.ts` and `tsconfig.app.json`.

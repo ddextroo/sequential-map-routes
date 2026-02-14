@@ -4,7 +4,7 @@
  * No API key. Usage: https://operations.osmfoundation.org/policies/overpass/
  */
 
-import type { Bbox, Place } from "@/types";
+import type { Bbox, Place, PlaceCategory } from "@/types";
 
 const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 
@@ -49,6 +49,21 @@ function getAddress(el: OverpassElement): string | undefined {
 	if (t["addr:country"]) parts.push(t["addr:country"]);
 	if (parts.length === 0) return undefined;
 	return parts.join(", ");
+}
+
+/** Infer PlaceCategory from OSM tags so type filter (e.g. beaches) matches. */
+function getCategoryFromTags(el: OverpassElement): PlaceCategory | undefined {
+	const t = el.tags ?? {};
+	const tourism = (t.tourism ?? "").toLowerCase();
+	const natural = (t.natural ?? "").toLowerCase();
+	const leisure = (t.leisure ?? "").toLowerCase();
+	const historic = t.historic;
+	const building = (t.building ?? "").toLowerCase();
+	const amenity = (t.amenity ?? "").toLowerCase();
+	if (tourism === "beach" || natural === "beach" || leisure === "beach") return "beaches";
+	if (natural === "peak" || natural === "volcano" || natural === "cliff" || tourism === "viewpoint") return "mountains";
+	if (historic || building === "church" || building === "temple" || amenity === "place_of_worship" || tourism === "museum") return "heritage";
+	return undefined;
 }
 
 interface OverpassElement {
@@ -128,6 +143,7 @@ export async function fetchPlacesOverpass(bbox: Bbox): Promise<{ places: Place[]
 
 			const placeType = getPlaceType(el);
 			const address = getAddress(el);
+			const category = getCategoryFromTags(el);
 
 			places.push({
 				id,
@@ -137,6 +153,7 @@ export async function fetchPlacesOverpass(bbox: Bbox): Promise<{ places: Place[]
 				wikipediaUrl: `https://www.openstreetmap.org/${el.type}/${el.id}`,
 				...(address && { address }),
 				placeType,
+				...(category && { category }),
 			});
 		}
 
